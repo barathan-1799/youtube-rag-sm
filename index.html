@@ -1,2 +1,183 @@
-<!doctype html><meta charset="utf-8"><title>OK</title>
-<p>GitHub Pages is working.</p>
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Ask Sadguru Madhusudan Sai</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 20px; font-size: 18px; background: #E6DCD4; }
+    h1 { font-size: 32px; color: #5F161A; } /* title color */
+    textarea { width: 100%; height: 120px; font-size: 20px; } /* increased question font */
+    button { padding: 10px; margin: 6px 0; width: 100%; box-sizing: border-box; }
+    #go { font-size: 20px; } /* increased Ask button font */
+    /* Make Next/Previous match Ask button font size */
+    #next, #prev { font-size: 20px; }
+    /* Make the first controls row single-column so Ask spans full width */
+    .controls:first-of-type { grid-template-columns: 1fr; }
+    /* Make the "Question" label slightly larger than textarea text */
+    label { font-size: 22px; }
+
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0 12px; }
+    .stack { position: relative; height: 360px; margin-top: 8px; }
+    /* EXTRA SPACE between cards and the nav buttons below */
+    .stack + .controls { margin-top: 24px; }
+
+    .card {
+      position: absolute; inset: 0;
+      background: #F3EFEA; /* ~2 shades lighter than #E6DCD4 */
+      border: 1px solid #e2e8f0; border-radius: 12px;
+      padding: 14px 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.08);
+      transition: transform 220ms ease, box-shadow 220ms ease, opacity 220ms ease;
+      overflow: auto;
+    }
+    /* ↑ meta font slightly smaller than output */
+    .card .meta { color: #444; margin-bottom: 8px; font-size: 0.9em; }
+    .card .meta a { color: #0a66c2; text-decoration: none; }
+    .card .meta a:hover { text-decoration: underline; }
+    .card .content { white-space: pre-wrap; line-height: 1.35; color: #5F161A; } /* output text color */
+    .hint { color:#666; font-size: 14px; margin-top: 8px; }
+    /* small tilt/offset effect for the stack */
+    .card[data-pos="0"] { z-index: 6; transform: translate(0,0) rotate(0deg); }
+    .card[data-pos="1"] { z-index: 5; transform: translate(4px, -2px) rotate(-1deg); }
+    .card[data-pos="2"] { z-index: 4; transform: translate(-4px, 3px) rotate(1deg); }
+    .card[data-pos="3"] { z-index: 3; transform: translate(6px, 6px) rotate(0.5deg); }
+    .card[data-pos="4"] { z-index: 2; transform: translate(-6px, -4px) rotate(-0.5deg); }
+    .card[data-pos="5"] { z-index: 1; transform: translate(2px, 8px) rotate(1deg); }
+
+    /* Center the spinner inside the loading card */
+    .card.loading { display: flex; align-items: center; justify-content: center; text-align: center; }
+    .card.loading .spinner { width: 72px; height: 72px; display: block; margin: 0 auto 10px; }
+  </style>
+</head>
+<body>
+  <h1>Ask Sadguru Madhusudan Sai</h1>
+
+  <label>Question</label>
+  <textarea id="q" placeholder="Type your question..."></textarea>
+
+  <div class="controls">
+    <button id="go">Ask</button>
+  </div>
+
+  <div id="stack" class="stack" aria-live="polite"></div>
+  <div class="controls">
+    <button id="prev" type="button">Previous</button>
+    <button id="next" type="button">Next</button>
+  </div>
+  <div class="hint">Tip: Use <b>Next</b>/<b>Previous</b> to cycle cards.</div>
+
+  <script>
+    // === Hardcoded config (edit these 2 lines) ===
+    const API_BASE = "https://yt-rag-604658064156.europe-west1.run.app"; // no trailing slash
+    const API_KEY  = "2016F30LCIBMW330iM-Sport"; // <-- replace with your real key
+    // =============================================
+
+    // Escape HTML to avoid XSS, then we selectively linkify "Source: <url>"
+    function escapeHtml(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+    function linkifySources(sEscaped){
+      return sEscaped.replace(/(Source:\s*)(https?:\/\/[^\s]+)/g,
+        (m, p1, url) => `${p1}<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`
+      );
+    }
+
+    // Parse backend stdout into 6 blocks using "=== TOP i ===" separators
+    function parseBlocks(raw){
+      // Remove any input() prompt text if present
+      raw = raw.replace(/^Please enter your question here\.\.\.\s*/i, "");
+      // Split on lines like "=== TOP 1 ==="
+      const parts = raw.split(/\n=+\s*TOP\s*\d+\s*=+\n/).map(s => s.trim()).filter(Boolean);
+      // Expect up to 6; if parsing fails, just return one big block
+      if (!parts.length) return [{ meta: "", content: raw.trim() }];
+      return parts.map(block => {
+        const lines = block.split(/\n/);
+        const metaLine = (lines[0] || "").trim();
+        const content  = lines.slice(1).join("\n").trim();
+        return { meta: metaLine, content };
+      });
+    }
+
+    // Render the stack of cards
+    let cardsData = []; // Array<{meta, content}>
+    function renderStack(){
+      const el = document.getElementById("stack");
+      el.innerHTML = "";
+      cardsData.forEach((item, idx) => {
+        const card = document.createElement("div");
+        card.className = "card";
+        card.dataset.pos = String(idx); // controls z-index & tilt via CSS
+
+        // Remove leading "Video: <id> | " (or "Video ID: <id> | ") from meta
+        const metaStr = item.meta.replace(/^Video(?:\s*ID)?\s*:\s*[^|]+(?:\s*\|\s*)?/i, "").trim();
+
+        const metaHtml = linkifySources(escapeHtml(metaStr));
+        const contentHtml = linkifySources(escapeHtml(item.content));
+
+        card.innerHTML = `
+          <div class="meta">${metaHtml}</div>
+          <div class="content">${contentHtml}</div>
+        `;
+        el.appendChild(card);
+      });
+    }
+
+    // Cycle order helpers
+    function nextCard(){
+      if (cardsData.length > 1) {
+        cardsData.push(cardsData.shift());
+        renderStack();
+      }
+    }
+    function prevCard(){
+      if (cardsData.length > 1) {
+        cardsData.unshift(cardsData.pop());
+        renderStack();
+      }
+    }
+
+    async function ask() {
+      const q = document.getElementById('q').value.trim();
+      const stack = document.getElementById('stack');
+      stack.innerHTML = "";
+      if (!q) { stack.textContent = "Please enter a question."; return; }
+
+      // Loading state as a single card with inline GIF spinner centered
+      const loading = document.createElement("div");
+      loading.className = "card loading";
+      loading.dataset.pos = "0";
+      loading.innerHTML = `
+        <div>
+          <img
+            src="spinner.gif" alt="Loading…" class="spinner" />
+          <div style="color:#5F161A;">Thinking…</div>
+        </div>`;
+      stack.appendChild(loading);
+
+      try {
+        const res = await fetch(API_BASE + "/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-api-key": API_KEY },
+          body: JSON.stringify({ question: q })
+        });
+        const data = await res.json();
+        const raw = (data.stdout || data.error || JSON.stringify(data, null, 2));
+        cardsData = parseBlocks(raw).slice(0, 6); // keep top 6 blocks
+        renderStack();
+      } catch (e) {
+        stack.innerHTML = "";
+        const err = document.createElement("div");
+        err.className = "card"; err.dataset.pos = "0";
+        err.textContent = "Error: " + e;
+        stack.appendChild(err);
+      }
+    }
+
+    // Wire up controls
+    document.getElementById('go').addEventListener('click', ask);
+    document.getElementById('next').addEventListener('click', nextCard);
+    document.getElementById('prev').addEventListener('click', prevCard);
+    document.getElementById('q').addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') ask();
+    });
+  </script>
+</body>
+</html>
